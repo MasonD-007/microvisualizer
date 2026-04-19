@@ -3,8 +3,11 @@ package minikube
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -132,7 +135,7 @@ func (c *Client) GetHealth(ctx context.Context) (*HealthStatus, error) {
 }
 
 func (c *Client) GetMetrics(ctx context.Context) (*Metrics, error) {
-	topology, err := c.GetTopology(ctx)
+	topology, err := c.GetTopology(ctx, "")
 	if err != nil {
 		return nil, err
 	}
@@ -189,15 +192,26 @@ func getConfig() (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags("", kubeconfig)
 }
 
-func (c *Client) GetTopology(ctx context.Context) (*Topology, error) {
+func (c *Client) GetTopology(ctx context.Context, namespace string) (*Topology, error) {
 	// Get all pods
-	pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	listOptions := metav1.ListOptions{
+		FieldSelector: "",
+	}
+	if namespace != "" && namespace != "all" {
+		listOptions.FieldSelector = "metadata.namespace=" + namespace
+	}
+	pods, err := c.clientset.CoreV1().Pods("").List(ctx, listOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
 
 	// Get all services
-	services, err := c.clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	var services *corev1.ServiceList
+	if namespace != "" && namespace != "all" {
+		services, err = c.clientset.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
+	} else {
+		services, err = c.clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to list services: %w", err)
 	}
@@ -439,4 +453,140 @@ func (c *Client) ScaleService(ctx context.Context, namespace, name string, repli
 	}
 
 	return nil
+}
+
+func (c *Client) CreateNamespace(ctx context.Context, namespace string) error {
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: namespace,
+		},
+	}
+	_, err := c.clientset.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
+	if err != nil {
+		// Check if already exists
+		if strings.Contains(err.Error(), "already exists") {
+			return nil
+		}
+		return fmt.Errorf("failed to create namespace %s: %w", namespace, err)
+	}
+	log.Printf("Created namespace: %s", namespace)
+	return nil
+}
+
+func (c *Client) ApplyManifest(ctx context.Context, manifestURL, namespace string) error {
+	// Download manifest
+	resp, err := http.Get(manifestURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch manifest: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("manifest fetch returned status %d", resp.StatusCode)
+	}
+
+	// Write to temp file
+	tmpFile, err := os.CreateTemp("", "manifest-*.yaml")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("failed to write manifest: %w", err)
+	}
+	tmpFile.Close()
+
+	// First create namespace if specified
+	if namespace != "" && namespace != "default" {
+		if err := c.CreateNamespace(ctx, namespace); err != nil {
+			log.Printf("Warning: failed to create namespace %s: %v", namespace, err)
+		}
+	}
+
+	// Apply manifest to specific namespace if provided
+	if namespace != "" {
+		// Use kubectl to apply with namespace
+		cmd := exec.Command("kubectl", "apply", "-f", tmpFile.Name(), "-n", namespace)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to apply manifest to namespace %s: %w\n%s", namespace, err, output)
+		}
+		log.Printf("Applied manifest to namespace %s: %s", namespace, output)
+	} else {
+		// Default namespace
+		cmd := exec.Command("kubectl", "apply", "-f", tmpFile.Name())
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to apply manifest: %w\n%s", err, output)
+		}
+		log.Printf("Applied manifest: %s", output)
+	}
+
+	return nil
+}
+
+func (c *Client) WaitForPodsReady(ctx context.Context, namespace string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	pollInterval := 2 * time.Second
+
+	log.Printf("Waiting up to %v for pods to be ready in namespace: %s", timeout, namespace)
+
+	for time.Now().Before(deadline) {
+		pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			log.Printf("Error listing pods: %v", err)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Skip system pods
+		var nonSystemPods []corev1.Pod
+		for _, pod := range pods.Items {
+			if pod.Namespace != "kube-system" && pod.Namespace != "kube-public" {
+				nonSystemPods = append(nonSystemPods, pod)
+			}
+		}
+
+		if len(nonSystemPods) == 0 {
+			log.Printf("No pods found in namespace %s, waiting...", namespace)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		allReady := true
+		readyCount := 0
+		for _, pod := range nonSystemPods {
+			if pod.Status.Phase == corev1.PodRunning {
+				// Check if all containers are ready
+				ready := true
+				for _, cond := range pod.Status.Conditions {
+					if cond.Type == corev1.PodReady && cond.Status != corev1.ConditionTrue {
+						ready = false
+						break
+					}
+				}
+				if ready {
+					readyCount++
+				} else {
+					allReady = false
+					break
+				}
+			} else {
+				allReady = false
+				break
+			}
+		}
+
+		if allReady && len(nonSystemPods) > 0 {
+			log.Printf("All %d pods are ready in namespace %s", readyCount, namespace)
+			return nil
+		}
+
+		log.Printf("Pods status: %d/%d ready in namespace %s", readyCount, len(nonSystemPods), namespace)
+		time.Sleep(pollInterval)
+	}
+
+	return fmt.Errorf("timeout waiting for pods to be ready in namespace %s", namespace)
 }

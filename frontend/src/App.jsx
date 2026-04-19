@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
+import { useLocation } from 'react-router-dom'
 import './App.css'
 
 const C = {
@@ -126,6 +127,9 @@ function TrafficParticle({ x1, y1, x2, y2, active, color = C.cyan }) {
 }
 
 export default function App() {
+  const location = useLocation()
+  const architecture = location.state?.architecture
+  const namespace = architecture?.namespace || ''
   const [services, setServices] = useState([])
   const [pods, setPods] = useState([])
   const [edges, setEdges] = useState([])
@@ -142,7 +146,8 @@ export default function App() {
   const svgRef = useRef()
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/topology`)
+    const url = namespace ? `${API_BASE}/api/topology?namespace=${encodeURIComponent(namespace)}` : `${API_BASE}/api/topology`
+    fetch(url)
       .then(res => res.json())
       .then(data => {
         setLoading(false)
@@ -193,6 +198,59 @@ export default function App() {
         setLoading(false)
       })
   }, [])
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const url = namespace ? `${API_BASE}/api/topology?namespace=${encodeURIComponent(namespace)}` : `${API_BASE}/api/topology`
+      fetch(url)
+        .then(res => res.json())
+        .then(data => {
+          if (!data.nodes || !data.nodes.length) return
+          const filteredSvcs = data.nodes.filter(n => 
+            n.type === 'service' && n.metadata?.namespace !== 'kube-system' && n.metadata?.namespace !== 'kube-public' && n.label !== 'kubernetes'
+          )
+          const podNodes = data.nodes.filter(n => n.type === 'pod')
+          const svcPodEdges = data.edges.filter(e => e.type === 'service-pod')
+          const svcDeps = data.edges.filter(e => e.type === 'service-dependency')
+
+          const cx = 600, cy = 300, r = 200
+          const posMap = {}
+          filteredSvcs.forEach((s, i) => {
+            const angle = (i / filteredSvcs.length) * Math.PI * 2 - Math.PI / 2
+            posMap[s.id] = { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r }
+          })
+          SVC_POS = posMap
+
+          const podToSvc = {}
+          svcPodEdges.forEach(e => { podToSvc[e.to] = e.from })
+
+          const mappedSvcs = filteredSvcs.map(s => ({
+            id: s.id,
+            label: s.label,
+            cpu: Math.floor(Math.random()*60+20),
+            mem: Math.floor(Math.random()*50+30),
+            rps: Math.floor(Math.random()*1000+100),
+            ns: s.metadata?.namespace || 'default',
+            status: 'healthy',
+          }))
+          const mappedPods = podNodes.map(p => ({
+            id: p.id,
+            parentId: podToSvc[p.id] || 'svc-unknown',
+            label: p.label,
+            status: p.status === 'down' ? 'failed' : 'healthy',
+            cpu: Math.floor(Math.random()*60+10),
+            mem: Math.floor(Math.random()*50+20),
+            restarts: Math.floor(Math.random()*3),
+          }))
+          const mappedEdges = svcDeps.map(e => ({ from: e.from, to: e.to }))
+          if (mappedSvcs.length) setServices(mappedSvcs)
+          if (mappedPods.length) setPods(mappedPods)
+          if (mappedEdges.length) setEdges(mappedEdges)
+        })
+        .catch(err => console.error('Failed to poll topology:', err))
+    }, 10000)
+    return () => clearInterval(id)
+  }, [namespace])
 
   useEffect(() => {
     const id = setInterval(() => {

@@ -25,6 +25,7 @@ func main() {
 	http.HandleFunc("/api/health", h.Health)
 	http.HandleFunc("/api/ready", h.Ready)
 	http.HandleFunc("/api/metrics", h.Metrics)
+	http.HandleFunc("/api/deploy", h.Deploy)
 	http.HandleFunc("/ws", h.WebSocket)
 
 	// Serve frontend

@@ -58,10 +58,13 @@ func (h *Handler) GetTopology(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get namespace from query param
+	namespace := r.URL.Query().Get("namespace")
+
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	topology, err := h.client.GetTopology(ctx)
+	topology, err := h.client.GetTopology(ctx, namespace)
 	if err != nil {
 		log.Printf("Failed to get topology: %v", err)
 		WriteError(w, http.StatusInternalServerError, "TOPOLOGY_ERROR", 
@@ -217,6 +220,14 @@ func (h *Handler) ResetCluster(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Cluster reset complete: %s", output)
 
+	cmd = exec.Command("kubectl", "scale", "deployment", "redis-cart", "--replicas=1")
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("Failed to scale redis-cart: %v\n%s", err, output)
+	} else {
+		log.Printf("Redis-cart scaled to 1 replica: %s", output)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "cluster reset",
@@ -241,7 +252,7 @@ func (h *Handler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-			topology, err := h.client.GetTopology(ctx)
+			topology, err := h.client.GetTopology(ctx, "")
 			cancel()
 			
 			if err != nil {
@@ -255,4 +266,61 @@ func (h *Handler) WebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func (h *Handler) Deploy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		WriteError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED",
+			"Method not allowed", fmt.Sprintf("Expected POST, got %s", r.Method))
+		return
+	}
+
+	var req struct {
+		ManifestURL string `json:"manifestUrl"`
+		Namespace   string `json:"namespace"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		WriteError(w, http.StatusBadRequest, "BAD_REQUEST",
+			"Invalid request body", err.Error())
+		return
+	}
+
+	if req.ManifestURL == "" {
+		WriteError(w, http.StatusBadRequest, "BAD_REQUEST",
+			"manifestUrl is required", "Please provide a manifest URL")
+		return
+	}
+
+	// Use provided namespace or default
+	namespace := req.Namespace
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	log.Printf("Deploying manifest: %s to namespace: %s", req.ManifestURL, namespace)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+
+	err := h.client.ApplyManifest(ctx, req.ManifestURL, namespace)
+	if err != nil {
+		log.Printf("Failed to deploy manifest: %v", err)
+		WriteError(w, http.StatusInternalServerError, "DEPLOY_ERROR",
+			"Failed to deploy manifest", err.Error())
+		return
+	}
+
+	log.Printf("Waiting for pods to be ready in namespace: %s", namespace)
+	if err := h.client.WaitForPodsReady(ctx, namespace, 60*time.Second); err != nil {
+		log.Printf("Warning: %v", err)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "deployed",
+		"manifest":  req.ManifestURL,
+		"namespace": namespace,
+		"timestamp": time.Now(),
+	})
 }
