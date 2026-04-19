@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os/exec"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"kubesight/backend/k8s"
+	"kubesight/backend/minikube"
 )
 
 // ErrorResponse represents a structured error response
@@ -33,12 +34,12 @@ func WriteError(w http.ResponseWriter, status int, code string, message string, 
 }
 
 type Handler struct {
-	client *k8s.Client
+	client *minikube.Client
 	upgrader websocket.Upgrader
 	startTime time.Time
 }
 
-func New(client *k8s.Client) *Handler {
+func New(client *minikube.Client) *Handler {
 	return &Handler{
 		client: client,
 		startTime: time.Now(),
@@ -149,13 +150,26 @@ func (h *Handler) TriggerChaos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var req struct {
+		Service string `json:"service"`
+		Action  string `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		req.Service = ""
+	}
+
+	if req.Service == "" {
+		WriteError(w, http.StatusBadRequest, "BAD_REQUEST",
+			"Service name required", "Please provide a service name")
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	// Scale payment service to 0 for chaos demo
-	err := h.client.ScaleDeployment(ctx, "default", "paymentservice", 0)
+	err := h.client.ScaleService(ctx, "default", req.Service, 0)
 	if err != nil {
-		log.Printf("Failed to trigger chaos: %v", err)
+		log.Printf("Failed to trigger chaos on %s: %v", req.Service, err)
 		WriteError(w, http.StatusInternalServerError, "CHAOS_ERROR",
 			"Failed to trigger chaos", err.Error())
 		return
@@ -164,7 +178,50 @@ func (h *Handler) TriggerChaos(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "chaos triggered",
-		"target":    "paymentservice",
+		"target":    req.Service,
+		"action":    "scaled to 0",
+		"timestamp": time.Now(),
+	})
+}
+
+func (h *Handler) ResetCluster(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		WriteError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED",
+			"Method not allowed", fmt.Sprintf("Expected POST, got %s", r.Method))
+		return
+	}
+
+	var req struct {
+		ManifestURL string `json:"manifestUrl"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		req.ManifestURL = ""
+	}
+
+	defaultManifest := "https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/main/release/kubernetes-manifests.yaml"
+	manifestURL := defaultManifest
+	if req.ManifestURL != "" {
+		manifestURL = req.ManifestURL
+	}
+
+	log.Printf("Resetting cluster with manifest: %s", manifestURL)
+
+	cmd := exec.Command("kubectl", "apply", "-f", manifestURL)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("Failed to apply manifest: %v\n%s", err, output)
+		WriteError(w, http.StatusInternalServerError, "RESET_ERROR",
+			"Failed to reset cluster", err.Error())
+		return
+	}
+
+	log.Printf("Cluster reset complete: %s", output)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "cluster reset",
+		"manifest":  manifestURL,
+		"output":    string(output),
 		"timestamp": time.Now(),
 	})
 }

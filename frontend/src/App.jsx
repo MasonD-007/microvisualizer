@@ -23,6 +23,10 @@ const C = {
   yellowDim: '#422006',
 }
 
+const API_BASE = ''
+
+let SVC_POS = {}
+
 const SERVICES = [
   { id:'svc-api',      label:'api-gateway',     cpu:68, mem:72, rps:1240, ns:'default' },
   { id:'svc-auth',     label:'auth-service',    cpu:34, mem:45, rps:580,  ns:'default' },
@@ -69,17 +73,6 @@ const PODS_INIT = [
   ...makePods('svc-cache', 2),
   ...makePods('svc-db', 2),
 ]
-
-const SVC_POS = {
-  'svc-api':      { x: 600, y: 200 },
-  'svc-auth':     { x: 280, y: 130 },
-  'svc-users':    { x: 180, y: 320 },
-  'svc-orders':   { x: 760, y: 130 },
-  'svc-payments': { x: 880, y: 310 },
-  'svc-notify':   { x: 1000, y: 460 },
-  'svc-cache':    { x: 480, y: 480 },
-  'svc-db':       { x: 700, y: 540 },
-}
 
 function getPodPos(svcId, podIndex, podCount) {
   const sp = SVC_POS[svcId]
@@ -133,11 +126,9 @@ function TrafficParticle({ x1, y1, x2, y2, active, color = C.cyan }) {
 }
 
 export default function App() {
-  const [services, setServices] = useState(() =>
-    SERVICES.map(s => ({ ...s, status: 'healthy' }))
-  )
-  const [pods, setPods] = useState(PODS_INIT)
-  const [edges] = useState(EDGES_INIT)
+  const [services, setServices] = useState([])
+  const [pods, setPods] = useState([])
+  const [edges, setEdges] = useState([])
   const [selected, setSelected] = useState(null)
   const [chaos, setChaos] = useState(null)
   const [, setTick] = useState(0)
@@ -147,20 +138,77 @@ export default function App() {
   const [dragStart, setDragStart] = useState(null)
   const [showTweaks, setShowTweaks] = useState(false)
   const [tweaks, setTweaks] = useState({ showParticles: true, colorScheme: 'blue', density: 'comfortable' })
+  const [loading, setLoading] = useState(true)
   const svgRef = useRef()
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/topology`)
+      .then(res => res.json())
+      .then(data => {
+        setLoading(false)
+        if (!data.nodes || !data.nodes.length) return
+        const filteredSvcs = data.nodes.filter(n => 
+          n.type === 'service' && n.metadata?.namespace !== 'kube-system' && n.metadata?.namespace !== 'kube-public' && n.label !== 'kubernetes'
+        )
+        const podNodes = data.nodes.filter(n => n.type === 'pod')
+        const svcPodEdges = data.edges.filter(e => e.type === 'service-pod')
+        const svcDeps = data.edges.filter(e => e.type === 'service-dependency')
+
+        const cx = 600, cy = 300, r = 200
+        const posMap = {}
+        filteredSvcs.forEach((s, i) => {
+          const angle = (i / filteredSvcs.length) * Math.PI * 2 - Math.PI / 2
+          posMap[s.id] = { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r }
+        })
+        SVC_POS = posMap
+
+        const podToSvc = {}
+        svcPodEdges.forEach(e => { podToSvc[e.to] = e.from })
+
+        const mappedSvcs = filteredSvcs.map(s => ({
+          id: s.id,
+          label: s.label,
+          cpu: Math.floor(Math.random()*60+20),
+          mem: Math.floor(Math.random()*50+30),
+          rps: Math.floor(Math.random()*1000+100),
+          ns: s.metadata?.namespace || 'default',
+          status: 'healthy',
+        }))
+        const mappedPods = podNodes.map(p => ({
+          id: p.id,
+          parentId: podToSvc[p.id] || 'svc-unknown',
+          label: p.label,
+          status: p.status === 'down' ? 'failed' : 'healthy',
+          cpu: Math.floor(Math.random()*60+10),
+          mem: Math.floor(Math.random()*50+20),
+          restarts: Math.floor(Math.random()*3),
+        }))
+        const mappedEdges = svcDeps.map(e => ({ from: e.from, to: e.to }))
+        if (mappedSvcs.length) setServices(mappedSvcs)
+        if (mappedPods.length) setPods(mappedPods)
+        if (mappedEdges.length) setEdges(mappedEdges)
+      })
+      .catch(err => { 
+        console.error('Failed to fetch topology:', err)
+        setLoading(false)
+      })
+  }, [])
 
   useEffect(() => {
     const id = setInterval(() => {
       setTick(t => t + 1)
-      setServices(prev => prev.map(s => ({
-        ...s,
-        cpu: s.status === 'failed' ? 0 : s.status === 'degraded'
-          ? Math.min(99, s.cpu + (Math.random()-0.3)*8)
-          : Math.max(5, Math.min(95, s.cpu + (Math.random()-0.5)*6)),
-        rps: s.status === 'failed' ? 0 : s.status === 'degraded'
-          ? Math.max(0, s.rps + (Math.random()-0.6)*80)
-          : Math.max(20, s.rps + (Math.random()-0.5)*60),
-      })))
+      setServices(prev => {
+        if (prev.length === 0) return prev
+        return prev.map(s => ({
+          ...s,
+          cpu: s.status === 'failed' ? 0 : s.status === 'degraded'
+            ? Math.min(99, s.cpu + (Math.random()-0.3)*8)
+            : Math.max(5, Math.min(95, s.cpu + (Math.random()-0.5)*6)),
+          rps: s.status === 'failed' ? 0 : s.status === 'degraded'
+            ? Math.max(0, s.rps + (Math.random()-0.6)*80)
+            : Math.max(20, s.rps + (Math.random()-0.5)*60),
+        }))
+      })
     }, 2000)
     return () => clearInterval(id)
   }, [])
@@ -177,11 +225,20 @@ export default function App() {
     return null
   }, [selected, services, pods])
 
-  const killService = () => {
+  const killService = async () => {
     const targets = services.filter(s=>s.status==='healthy')
     if (!targets.length) return
     const t = targets[Math.floor(Math.random()*targets.length)]
     setChaos('kill')
+    try {
+      await fetch(`${API_BASE}/api/chaos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service: t.label, action: 'kill' })
+      })
+    } catch (err) {
+      console.error('Chaos API error:', err)
+    }
     setTimeout(() => {
       setServices(prev => prev.map(s => s.id===t.id ? {...s, status:'failed'} : s))
       setPods(prev => prev.map(p => p.parentId===t.id ? {...p, status:'failed'} : p))
@@ -189,24 +246,16 @@ export default function App() {
     }, 1200)
   }
 
-  const trafficLoad = () => {
-    setChaos('load')
-    setTimeout(() => {
-      setServices(prev => prev.map(s => s.status==='healthy' && Math.random()>0.5
-        ? {...s, status:'degraded', cpu: Math.min(99, s.cpu+30)}
-        : s))
-      setChaos(null)
-    }, 1500)
-  }
-
-  const resetAll = () => {
+  const resetAll = async () => {
     setChaos('resetting')
+    try {
+      await fetch(`${API_BASE}/api/reset`, { method: 'POST' })
+    } catch (err) {
+      console.error('Reset API error:', err)
+    }
     setTimeout(() => {
-      setServices(SERVICES.map(s => ({...s, status:'healthy'})))
-      setPods(PODS_INIT)
-      setSelected(null)
-      setChaos(null)
-    }, 1800)
+      window.location.reload()
+    }, 3000)
   }
 
   const handleWheel = e => {
@@ -242,6 +291,18 @@ export default function App() {
       window.parent.postMessage({ type:'__edit_mode_set_keys', edits: next }, '*')
       return next
     })
+  }
+
+  if (loading) {
+    return (
+      <div style={{ width:'100vw', height:'100vh', display:'flex', alignItems:'center', justifyContent:'center',
+        background: C.bg, color: C.text }}>
+        <div style={{ textAlign:'center' }}>
+          <div style={{ fontSize:24, marginBottom:16 }}>Loading K8s topology...</div>
+          <div style={{ color:C.textDim, fontFamily:'IBM Plex Mono' }}>Connecting to minikube</div>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -300,20 +361,13 @@ export default function App() {
                 onClick={killService}
               />
               <ChaosBtn
-                label="Traffic Load"
-                icon="↑"
-                color={C.orange}
-                loading={chaos==='load'}
-                disabled={!!chaos}
-                onClick={trafficLoad}
-              />
-              <ChaosBtn
-                label="Reset All"
+                label="Reset Cluster"
                 icon="↺"
                 color={accentColor}
                 loading={chaos==='resetting'}
                 disabled={chaos==='resetting'}
                 onClick={resetAll}
+                color={accentColor}
               />
             </div>
           </div>

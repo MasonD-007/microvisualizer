@@ -5,12 +5,12 @@ import (
 	"net/http"
 
 	"kubesight/backend/handlers"
-	"kubesight/backend/k8s"
+	"kubesight/backend/minikube"
 )
 
 func main() {
 	// Initialize Kubernetes client
-	client, err := k8s.NewClient()
+	client, err := minikube.NewClient()
 	if err != nil {
 		log.Fatalf("Failed to create Kubernetes client: %v", err)
 	}
@@ -21,6 +21,7 @@ func main() {
 	// API routes
 	http.HandleFunc("/api/topology", h.GetTopology)
 	http.HandleFunc("/api/chaos", h.TriggerChaos)
+	http.HandleFunc("/api/reset", h.ResetCluster)
 	http.HandleFunc("/api/health", h.Health)
 	http.HandleFunc("/api/ready", h.Ready)
 	http.HandleFunc("/api/metrics", h.Metrics)

@@ -1,4 +1,4 @@
-package k8s
+package minikube
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -392,6 +393,47 @@ func (c *Client) ScaleDeployment(ctx context.Context, namespace, name string, re
 
 	deployment.Spec.Replicas = &replicas
 	_, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update deployment: %w", err)
+	}
+
+	return nil
+}
+
+func (c *Client) ScaleService(ctx context.Context, namespace, name string, replicas int32) error {
+	deployments, err := c.clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list deployments: %w", err)
+	}
+
+	var target *appsv1.Deployment
+	for _, d := range deployments.Items {
+		if d.Name == name || d.Name == name+"-service" {
+			target = &d
+			break
+		}
+	}
+
+	if target == nil {
+		for _, d := range deployments.Items {
+			for _, svcName := range []string{name, name + "-service", name + "service"} {
+				if d.Name == svcName || strings.Contains(d.Name, svcName) {
+					target = &d
+					break
+				}
+			}
+			if target != nil {
+				break
+			}
+		}
+	}
+
+	if target == nil {
+		return fmt.Errorf("deployment not found: %s in namespace %s", name, namespace)
+	}
+
+	target.Spec.Replicas = &replicas
+	_, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, target, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to update deployment: %w", err)
 	}
