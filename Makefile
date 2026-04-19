@@ -1,14 +1,17 @@
-.PHONY: setup start-cluster deploy-demo wait-pods build build-frontend build-backend run dev dev-bg chaos restore status stop clean
+.PHONY: setup start-cluster deploy-demo wait-pods build build-frontend build-backend run dev dev-bg dev-frontend dev-backend chaos restore status stop clean regenerate-cluster
 
 CLUSTER_MEMORY := 4096
 CLUSTER_CPUS := 2
 PORT := 8080
+FRONTEND_PORT := 5173
 
 # Default: full setup
 setup: start-cluster deploy-demo wait-pods build
 
-# Full dev mode (cluster + deploy + build + run)
-dev: setup run
+# Full dev mode - builds and runs server
+dev: build
+	@echo "Starting KubeSight on http://localhost:$(PORT)..."
+	./kubesight
 
 # Start minikube cluster
 start-cluster:
@@ -104,11 +107,24 @@ stop:
 	minikube stop
 	@echo "Minikube stopped!"
 
+# Delete and recreate cluster + redeploy microservices
+regenerate-cluster:
+	@echo "Deleting existing cluster..."
+	-minikube delete 2>/dev/null || true
+	@echo "Starting new cluster..."
+	minikube start --driver=docker --memory=$(CLUSTER_MEMORY) --cpus=$(CLUSTER_CPUS)
+	@echo "Deploying microservices-demo..."
+	kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/main/release/kubernetes-manifests.yaml
+	@echo "Waiting for pods to be ready (this may take a few minutes)..."
+	kubectl wait --for=condition=ready pod --all --timeout=300s || true
+	@echo "Pod status:"
+	kubectl get pods
+
 # Clean everything - stop and delete cluster, remove build artifacts
 clean:
 	@echo "Cleaning up..."
 	-minikube delete 2>/dev/null || true
-	-rm -rf frontend/node_modules frontend/dist kubesight kubesight.log
+	-rm -rf frontend/node_modules frontend/dist kubesight kubesight.log frontend.log
 	@echo "Cleaned!"
 
 # Help
@@ -117,27 +133,30 @@ help:
 	@echo ""
 	@echo "  Setup & Run:"
 	@echo "    make setup       - Start cluster, deploy demo, wait for pods, build"
-	@echo "    make dev         - Full setup + run server (interactive)"
+	@echo "    make dev         - Build + run frontend dev (hot-reload) + backend (auto-rebuild)"
 	@echo "    make run         - Start KubeSight server (requires build)"
 	@echo "    make run-bg      - Start server in background"
+	@echo "    make dev-frontend - Run only frontend dev server (hot-reload)"
+	@echo "    make dev-backend - Run only backend with auto-rebuild"
 	@echo ""
 	@echo "  Cluster Management:"
-	@echo "    make start-cluster   - Start minikube"
-	@echo "    make deploy-demo     - Deploy microservices-demo"
-	@echo "    make wait-pods       - Wait for all pods ready"
-	@echo "    make stop            - Stop minikube"
-	@echo "    make clean           - Delete minikube + clean build artifacts"
+	@echo "    make start-cluster    - Start minikube"
+	@echo "    make deploy-demo  - Deploy microservices-demo"
+	@echo "    make wait-pods    - Wait for all pods ready"
+	@echo "    make stop        - Stop minikube"
+	@echo "    make regenerate-cluster - Delete and recreate cluster + redeploy"
+	@echo "    make clean      - Delete minikube + clean build artifacts"
 	@echo ""
 	@echo "  Build:"
-	@echo "    make build           - Build frontend + backend"
-	@echo "    make build-frontend  - npm install + build"
-	@echo "    make build-backend   - go build"
+	@echo "    make build          - Build frontend + backend"
+	@echo "    make build-frontend - npm install + build"
+	@echo "    make build-backend  - go build"
 	@echo ""
 	@echo "  Testing:"
-	@echo "    make chaos           - Scale paymentservice to 0 (test failure)"
-	@echo "    make restore         - Restore paymentservice to 1"
+	@echo "    make chaos      - Scale paymentservice to 0 (test failure)"
+	@echo "    make restore  - Restore paymentservice to 1"
 	@echo ""
 	@echo "  Utilities:"
-	@echo "    make status          - Show cluster + app status"
-	@echo "    make open            - Open KubeSight in browser"
-	@echo "    make help            - Show this help"
+	@echo "    make status   - Show cluster + app status"
+	@echo "    make open   - Open KubeSight in browser"
+	@echo "    make help   - Show this help"

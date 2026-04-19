@@ -26,8 +26,8 @@ func main() {
 	http.HandleFunc("/api/metrics", h.Metrics)
 	http.HandleFunc("/ws", h.WebSocket)
 
-	// Serve network frontend
-	fs := http.FileServer(http.Dir("network"))
+	// Serve frontend
+	fs := http.FileServer(http.Dir("frontend/dist"))
 	http.Handle("/", fs)
 
 	log.Println("Server starting on :8080")
