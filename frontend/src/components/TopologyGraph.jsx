@@ -1,42 +1,15 @@
 import { useEffect, useRef } from 'react'
-import { Network } from 'vis-network/standalone'
+import { Network, DataSet } from 'vis-network/standalone'
 
 function TopologyGraph({ topology }) {
   const containerRef = useRef(null)
   const networkRef = useRef(null)
+  const nodesRef = useRef(null)
+  const edgesRef = useRef(null)
 
+  // Initialize network once on mount
   useEffect(() => {
     if (!containerRef.current) return
-
-    // Transform topology data to vis-network format
-    const nodes = topology.nodes?.map(node => ({
-      id: node.id,
-      label: node.label,
-      color: getNodeColor(node),
-      shape: getNodeShape(node),
-      font: { color: '#e0e0e0', size: 12 },
-      borderWidth: 2,
-      borderWidthSelected: 4,
-      size: node.type === 'service' ? 25 : 15,
-      title: generateTooltip(node),
-    })) || []
-
-    const edges = topology.edges?.map((edge, index) => ({
-      id: `edge-${index}`,
-      from: edge.from,
-      to: edge.to,
-      color: {
-        color: edge.type === 'service-pod' ? '#4a90e2' : '#666',
-        highlight: '#ff6b6b',
-      },
-      width: edge.type === 'service-pod' ? 2 : 1,
-      smooth: { type: 'continuous' },
-      arrows: {
-        to: { enabled: true, scaleFactor: 0.5 }
-      },
-    })) || []
-
-    const data = { nodes, edges }
 
     const options = {
       nodes: {
@@ -75,18 +48,81 @@ function TopologyGraph({ topology }) {
       },
     }
 
-    if (!networkRef.current) {
-      networkRef.current = new Network(containerRef.current, data, options)
-    } else {
-      networkRef.current.setData(data)
-    }
+    // Create DataSets for efficient updates
+    nodesRef.current = new DataSet([])
+    edgesRef.current = new DataSet([])
 
+    networkRef.current = new Network(
+      containerRef.current,
+      { nodes: nodesRef.current, edges: edgesRef.current },
+      options
+    )
+
+    // Cleanup only on unmount
     return () => {
       if (networkRef.current) {
         networkRef.current.destroy()
         networkRef.current = null
       }
+      nodesRef.current = null
+      edgesRef.current = null
     }
+  }, []) // Empty deps = run once on mount
+
+  // Update data when topology changes
+  useEffect(() => {
+    if (!nodesRef.current || !edgesRef.current) return
+
+    // Transform topology data to vis-network format
+    const nodes = topology.nodes?.map(node => ({
+      id: node.id,
+      label: node.label,
+      color: getNodeColor(node),
+      shape: getNodeShape(node),
+      font: { color: '#e0e0e0', size: 12 },
+      borderWidth: 2,
+      borderWidthSelected: 4,
+      size: node.type === 'service' ? 25 : 15,
+      title: generateTooltip(node),
+    })) || []
+
+    const edges = topology.edges?.map((edge, index) => {
+      // Determine edge styling based on type
+      let color = '#666'
+      let width = 1
+      let dashes = false
+      
+      if (edge.type === 'service-pod') {
+        color = '#4a90e2'  // Blue for service -> pod
+        width = 2
+      } else if (edge.type === 'service-dependency') {
+        color = '#f39c12'  // Orange for service -> service dependency
+        width = 2
+        dashes = true      // Dashed line for service dependencies
+      }
+      
+      return {
+        id: `edge-${index}`,
+        from: edge.from,
+        to: edge.to,
+        color: {
+          color: color,
+          highlight: '#ff6b6b',
+        },
+        width: width,
+        dashes: dashes,
+        smooth: { type: 'continuous' },
+        arrows: {
+          to: { enabled: true, scaleFactor: 0.5 }
+        },
+      }
+    }) || []
+
+    // Efficiently update data using DataSet methods
+    nodesRef.current.clear()
+    nodesRef.current.add(nodes)
+    edgesRef.current.clear()
+    edgesRef.current.add(edges)
   }, [topology])
 
   return (

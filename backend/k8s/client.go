@@ -1,0 +1,400 @@
+package k8s
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+)
+
+type Client struct {
+	clientset *kubernetes.Clientset
+	connected bool
+	startTime time.Time
+}
+
+type Node struct {
+	ID       string            `json:"id"`
+	Label    string            `json:"label"`
+	Type     string            `json:"type"`
+	Status   string            `json:"status"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+type Edge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Type string `json:"type"`
+}
+
+type Topology struct {
+	Nodes []Node `json:"nodes"`
+	Edges []Edge `json:"edges"`
+}
+
+type HealthStatus struct {
+	Status      string            `json:"status"`
+	Timestamp   time.Time         `json:"timestamp"`
+	Version     string            `json:"version"`
+	Uptime      string            `json:"uptime"`
+	Kubernetes  KubernetesHealth  `json:"kubernetes"`
+}
+
+type KubernetesHealth struct {
+	Connected bool   `json:"connected"`
+	Version   string `json:"version"`
+}
+
+type Metrics struct {
+	Timestamp    time.Time       `json:"timestamp"`
+	Nodes        NodeMetrics     `json:"nodes"`
+	Topology     TopologyMetrics `json:"topology"`
+	Performance  PerfMetrics     `json:"performance"`
+}
+
+type NodeMetrics struct {
+	Total     int `json:"total"`
+	Services  int `json:"services"`
+	Pods      int `json:"pods"`
+	Running   int `json:"running"`
+	Down      int `json:"down"`
+}
+
+type TopologyMetrics struct {
+	Nodes int `json:"nodes"`
+	Edges int `json:"edges"`
+}
+
+type PerfMetrics struct {
+	Uptime string `json:"uptime"`
+}
+
+var (
+	// Matches env vars like: PRODUCT_CATALOG_SERVICE_ADDR=service:port
+	serviceAddrRegex = regexp.MustCompile(`(?i)([a-z_]+)_SERVICE_ADDR`)
+	version = "dev" // Set at build time with -ldflags
+)
+
+func NewClient() (*Client, error) {
+	config, err := getConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get kubernetes config: %w", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes clientset: %w", err)
+	}
+
+	return &Client{
+		clientset: clientset,
+		connected: true,
+		startTime: time.Now(),
+	}, nil
+}
+
+func (c *Client) GetHealth(ctx context.Context) (*HealthStatus, error) {
+	if !c.connected {
+		return nil, fmt.Errorf("kubernetes client not connected")
+	}
+
+	// Test K8s connection by getting version
+	serverVersion, err := c.clientset.Discovery().ServerVersion()
+	k8sVersion := "unknown"
+	k8sConnected := false
+	
+	if err == nil {
+		k8sConnected = true
+		k8sVersion = serverVersion.GitVersion
+	}
+
+	return &HealthStatus{
+		Status:    "healthy",
+		Timestamp: time.Now(),
+		Version:   serverVersion.GitVersion,
+		Uptime:    time.Since(c.startTime).String(),
+		Kubernetes: KubernetesHealth{
+			Connected: k8sConnected,
+			Version:   k8sVersion,
+		},
+	}, nil
+}
+
+func (c *Client) GetMetrics(ctx context.Context) (*Metrics, error) {
+	topology, err := c.GetTopology(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	services := 0
+	pods := 0
+	running := 0
+	down := 0
+
+	for _, node := range topology.Nodes {
+		switch node.Type {
+		case "service":
+			services++
+		case "pod":
+			pods++
+			if node.Status == "running" {
+				running++
+			} else {
+				down++
+			}
+		}
+	}
+
+	return &Metrics{
+		Timestamp: time.Now(),
+		Nodes: NodeMetrics{
+			Total:    len(topology.Nodes),
+			Services: services,
+			Pods:     pods,
+			Running:  running,
+			Down:     down,
+		},
+		Topology: TopologyMetrics{
+			Nodes: len(topology.Nodes),
+			Edges: len(topology.Edges),
+		},
+		Performance: PerfMetrics{
+			Uptime: time.Since(c.startTime).String(),
+		},
+	}, nil
+}
+
+func getConfig() (*rest.Config, error) {
+	// Try in-cluster config first
+	config, err := rest.InClusterConfig()
+	if err == nil {
+		return config, nil
+	}
+
+	// Fall back to kubeconfig
+	home := os.Getenv("HOME")
+	kubeconfig := filepath.Join(home, ".kube", "config")
+	
+	return clientcmd.BuildConfigFromFlags("", kubeconfig)
+}
+
+func (c *Client) GetTopology(ctx context.Context) (*Topology, error) {
+	// Get all pods
+	pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods: %w", err)
+	}
+
+	// Get all services
+	services, err := c.clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list services: %w", err)
+	}
+
+	topology := &Topology{
+		Nodes: []Node{},
+		Edges: []Edge{},
+	}
+
+	// Build service name map for dependency detection
+	serviceNames := make(map[string]string) // service name -> svc-<name>
+	for _, svc := range services.Items {
+		if svc.Spec.Type == corev1.ServiceTypeClusterIP {
+			serviceNames[svc.Name] = fmt.Sprintf("svc-%s", svc.Name)
+		}
+	}
+
+	// Add service nodes
+	for _, svc := range services.Items {
+		if svc.Spec.Type == corev1.ServiceTypeClusterIP {
+			node := Node{
+				ID:     fmt.Sprintf("svc-%s", svc.Name),
+				Label:  svc.Name,
+				Type:   "service",
+				Status: "active",
+				Metadata: map[string]string{
+					"namespace": svc.Namespace,
+					"clusterIP": svc.Spec.ClusterIP,
+				},
+			}
+			topology.Nodes = append(topology.Nodes, node)
+		}
+	}
+
+	// Add pod nodes and edges
+	for _, pod := range pods.Items {
+		// Skip system pods
+		if pod.Namespace == "kube-system" || pod.Namespace == "kube-public" {
+			continue
+		}
+
+		status := "running"
+		if pod.Status.Phase != corev1.PodRunning {
+			status = "down"
+		}
+
+		node := Node{
+			ID:     fmt.Sprintf("pod-%s", pod.Name),
+			Label:  pod.Name,
+			Type:   "pod",
+			Status: status,
+			Metadata: map[string]string{
+				"namespace": pod.Namespace,
+				"podIP":     pod.Status.PodIP,
+			},
+		}
+		topology.Nodes = append(topology.Nodes, node)
+
+		// Find which service this pod belongs to based on labels
+		for _, svc := range services.Items {
+			if svc.Namespace != pod.Namespace {
+				continue
+			}
+			if matchesSelector(pod.Labels, svc.Spec.Selector) {
+				edge := Edge{
+					From: fmt.Sprintf("svc-%s", svc.Name),
+					To:   fmt.Sprintf("pod-%s", pod.Name),
+					Type: "service-pod",
+				}
+				topology.Edges = append(topology.Edges, edge)
+			}
+		}
+	}
+
+	// Detect inter-service dependencies from pod env vars
+	for _, pod := range pods.Items {
+		if pod.Namespace == "kube-system" || pod.Namespace == "kube-public" {
+			continue
+		}
+
+		// Find which service this pod belongs to
+		var podService string
+		for _, svc := range services.Items {
+			if svc.Namespace == pod.Namespace && matchesSelector(pod.Labels, svc.Spec.Selector) {
+				podService = fmt.Sprintf("svc-%s", svc.Name)
+				break
+			}
+		}
+		
+		if podService == "" {
+			continue
+		}
+
+		// Parse env vars for service dependencies
+		for _, container := range pod.Spec.Containers {
+			for _, env := range container.Env {
+				if env.Value == "" {
+					continue
+				}
+
+				// Check for *_ADDR patterns
+				matches := serviceAddrRegex.FindStringSubmatch(env.Name)
+				if len(matches) > 1 {
+					targetService := extractServiceFromAddr(env.Value)
+					if targetService != "" {
+						targetSvcID := fmt.Sprintf("svc-%s", targetService)
+						// Debug logging
+						log.Printf("DEBUG: Found env var %s=%s, extracted service=%s, targetSvcID=%s", 
+							env.Name, env.Value, targetService, targetSvcID)
+						log.Printf("DEBUG: Looking for targetService=%s in serviceNames map with keys: %v",
+							targetService, func() []string {
+								keys := make([]string, 0, len(serviceNames))
+								for k := range serviceNames {
+									keys = append(keys, k)
+								}
+								return keys
+							}())
+						if _, exists := serviceNames[targetService]; exists {
+							log.Printf("DEBUG: Service %s found in map, podService=%s, targetSvcID=%s", targetService, podService, targetSvcID)
+							// Check if edge already exists to avoid duplicates
+							edgeExists := false
+							for _, e := range topology.Edges {
+								if e.From == podService && e.To == targetSvcID && e.Type == "service-dependency" {
+									edgeExists = true
+									log.Printf("DEBUG: Edge already exists: %s -> %s", podService, targetSvcID)
+									break
+								}
+							}
+							if !edgeExists {
+								edge := Edge{
+									From: podService,
+									To:   targetSvcID,
+									Type: "service-dependency",
+								}
+								topology.Edges = append(topology.Edges, edge)
+								log.Printf("DEBUG: Added edge: %s -> %s", podService, targetSvcID)
+							} else {
+								log.Printf("DEBUG: Edge already exists, not adding: %s -> %s", podService, targetSvcID)
+							}
+						} else {
+							log.Printf("DEBUG: Service %s NOT found in map", targetService)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return topology, nil
+}
+
+// extractServiceFromAddr extracts service name from address like "service:port" or "service.namespace:port"
+func extractServiceFromAddr(addr string) string {
+	if addr == "" {
+		return ""
+	}
+
+	// Handle formats like:
+	// - service:port
+	// - service.namespace:port  
+	// - service.namespace.svc.cluster.local:port
+	
+	// Split by colon to remove port
+	parts := strings.Split(addr, ":")
+	host := parts[0]
+
+	// Split by dots and take first part (service name)
+	hostParts := strings.Split(host, ".")
+	if len(hostParts) > 0 && hostParts[0] != "" {
+		return hostParts[0]
+	}
+
+	return ""
+}
+
+func matchesSelector(podLabels, selector map[string]string) bool {
+	if len(selector) == 0 {
+		return false
+	}
+	for key, value := range selector {
+		if podLabels[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) ScaleDeployment(ctx context.Context, namespace, name string, replicas int32) error {
+	deployment, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get deployment: %w", err)
+	}
+
+	deployment.Spec.Replicas = &replicas
+	_, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update deployment: %w", err)
+	}
+
+	return nil
+}
