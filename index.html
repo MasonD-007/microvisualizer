@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KubeSight - Real-Time K8s Microservice Visualizer</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <h1>🕸️ KubeSight</h1>
+        <p>Real-Time Kubernetes Microservice Network Visualizer</p>
+    </header>
+
+    <div class="controls">
+        <div class="chaos-controls">
+            <h3>Chaos Engineering</h3>
+            <button id="kill-service-btn" class="chaos-button">💀 Kill Service</button>
+            <button id="traffic-load-btn" class="chaos-button">🚦 Increase Traffic Load</button>
+            <button id="network-latency-btn" class="chaos-button">🐌 Add Network Latency</button>
+            <button id="pod-crash-btn" class="chaos-button">⚠️ Pod Crash Loop</button>
+            <button id="reset-btn" class="reset-button">🔄 Reset Cluster</button>
+        </div>
+        <div class="status">
+            <span id="connection-status" class="status-indicator"></span>
+            <span id="status-text">Polling...</span>
+        </div>
+    </div>
+
+    <div id="network-graph"></div>
+
+    <div class="legend">
+        <h4>Legend</h4>
+        <div class="legend-item">
+            <span class="legend-dot healthy"></span> Healthy
+        </div>
+        <div class="legend-item">
+            <span class="legend-dot degraded"></span> Degraded
+        </div>
+        <div class="legend-item">
+            <span class="legend-dot down"></span> Down
+        </div>
+        <div class="legend-item">
+            <span class="legend-line normal"></span> Normal Traffic
+        </div>
+        <div class="legend-item">
+            <span class="legend-line heavy"></span> Heavy Traffic
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
