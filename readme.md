@@ -87,7 +87,3 @@ KubeSight was built to compete in the following Synthesis prize tracks:
 3.  **Socket Programming:** Utilizing API streams to maintain a live websocket/polling connection between the K8s control plane and the visualization UI.
 
 -----
-
-### 💡 Hackathon Pro-Tip before you submit:
-
-Once you have the code running on your machine, take a screenshot or a 10-second screen recording of the graph reacting to the "Chaos" button, and replace the placeholder image link at the top of this README with your actual screenshot. Visuals in the README secure points before the judges even hear your pitch\!
